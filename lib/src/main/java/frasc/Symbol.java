@@ -1,6 +1,8 @@
 package frasc;
 
 import java.math.BigInteger;
+import java.util.HashSet;
+import java.util.Random;
 
 public class Symbol {
     static final int FSST_CODE_BITS = 9;
@@ -12,6 +14,8 @@ public class Symbol {
     private static final String prime = new String("2971215073");
     static final BigInteger FSST_HASH_PRIME = new BigInteger(prime);
     static final int FSST_SHIFT = 15;
+    static final int FSST_SAMPLETARGET = (1 << 14);
+    static final long FSST_SAMPLEMAXSZ = ((long) 2 * FSST_SAMPLETARGET);
 
     int maxLength = 0;
     long value = 0;
@@ -69,7 +73,7 @@ public class Symbol {
         return (int) (0xFFFF & this.value);
     }
 
-    private BigInteger FSST_HASH(long w) {
+    static BigInteger FSST_HASH(long w) {
         BigInteger conv = new BigInteger(String.valueOf(w));
         return (((conv).multiply(FSST_HASH_PRIME)).xor((((conv).multiply(FSST_HASH_PRIME)).shiftRight(FSST_SHIFT))));
     }
@@ -338,22 +342,148 @@ class SymbolTable {
             symbols[newCode[i]] = s1;
         }
         // renumber the codes in byteCodes[]
-        for (int i = 0; i < 256; i++)
+        for (int i = 0; i < 256; i++) {
             if ((byteCodes[i] & Symbol.FSST_CODE_MASK) >= Symbol.FSST_CODE_BASE)
                 byteCodes[i] = newCode[(int) byteCodes[i]] + (1 << Symbol.FSST_LEN_BITS);
             else
                 byteCodes[i] = 511 + (1 << Symbol.FSST_LEN_BITS);
-
+        }
         // renumber the codes in shortCodes[]
-        for (int i = 0; i < 65536; i++)
+        for (int i = 0; i < 65536; i++) {
             if ((shortCodes[i] & Symbol.FSST_CODE_MASK) >= Symbol.FSST_CODE_BASE)
                 shortCodes[i] = newCode[(int) shortCodes[i]] + (shortCodes[i] & (15 << Symbol.FSST_LEN_BITS));
             else
                 shortCodes[i] = byteCodes[i & 0xFF];
+        }
 
         // replace the symbols in the hash table
         for (int i = 0; i < hashTabSize; i++)
             if (hashTab[i].icl < QSymbol.FSST_ICL_FREE)
                 hashTab[i] = symbols[newCode[(int) hashTab[i].code()]];
     }
-};
+
+    boolean isEscapeCode(int pos) {
+        return pos < Symbol.FSST_CODE_BASE;
+    }
+
+    // TODO: This functionn is technically written as a lambda function inside the
+    // buildSymbolTable function
+    // Unclear whether it is okay to leave it as a standalone function, but for
+    // simplicity's sake leaving it for now.
+    int compressCount(SymbolTable symbolTable, Counters counters, int[] line, int[] len, int sampleFrac) {
+        int gain = 0;
+        Random rand = new Random();
+        for (int i = 0; i < len.length; i++) {
+            int cur = line[i];
+            int end = cur + len[i];
+            if (sampleFrac < 128) {
+                if (rand.nextInt(i) > sampleFrac) {
+                    continue;
+                }
+            }
+            if (cur < end) {
+                int start = cur;
+                int code2 = 255, code1 = symbolTable.findLongestSymbol(cur, end);
+                cur += symbolTable.symbols[code1].length();
+                gain += (int) (symbolTable.symbols[code1].length() - (1 + Utils.boolToInt(isEscapeCode(code1))));
+                while (true) {
+                    // count single symbol (i.e. an option is not extending it)
+                    // TODO: Double check which boolean flag we need for our specific implementation
+                    counters.count1Inc(code1, true);
+
+                    // as an alternative, consider just using the next byte..
+                    if (symbolTable.symbols[code1].length() != 1) // .. but do not count single byte symbols doubly
+                        // TODO: Double check which boolean flag we need for our specific implementation
+                        counters.count1Inc(start, true);
+
+                    if (cur == end) {
+                        break;
+                    }
+
+                    // now match a new symbol
+                    start = cur;
+                    if (cur < end - 7) {
+                        // NOTE: Technically the c++ code does an unaligned load here, but I'm not sure
+                        // how to replicate that or if we even need to
+                        double word = cur;
+                        int code = (int) word & 0xFFFFFF;
+                        int idx = Symbol.FSST_HASH(code).intValueExact() & (hashTabSize - 1);
+                        Symbol s = symbolTable.hashTab[idx];
+                        long word_bits = Double.doubleToRawLongBits(word);
+                        long offset_bits = Double.doubleToRawLongBits(0xFFFF);
+                        long res = word_bits & offset_bits;
+                        code2 = symbolTable.shortCodes[(int) res] & Symbol.FSST_CODE_MASK;
+                        double literal = 0xFFFFFFFFFFFFFFFFL;
+                        // Probably unsafe integer cast here
+                        int t = ((int) literal >> (int) s.icl);
+                        // FIXME: Find a way to integrate this back in
+                        // word &= t;
+                        if ((s.icl < QSymbol.FSST_ICL_FREE) & (s.value == word)) {
+                            code2 = s.code();
+                            cur += s.length();
+                        } else if (code2 >= Symbol.FSST_CODE_BASE) {
+                            cur += 2;
+                        } else {
+                            // Probably unsafe integer cast here
+                            code2 = symbolTable.byteCodes[(int) word & 0xFF] & Symbol.FSST_CODE_MASK;
+                            cur += 1;
+                        }
+                    } else {
+                        code2 = symbolTable.findLongestSymbol(cur, end);
+                        cur += symbolTable.symbols[code2].length();
+                    }
+
+                    // compute compressed output size
+                    gain += ((int) (cur - start)) - (1 + Utils.boolToInt(isEscapeCode(code2)));
+
+                    // now count the subsequent two symbols we encode as an extension codesibility
+                    if (sampleFrac < 128) { // no need to count pairs in final round
+                        // consider the symbol that is the concatenation of the two last symbols
+                        counters.count2Inc(code1, code2, true);
+
+                        // as an alternative, consider just extending with the next byte..
+                        if ((cur - start) > 1) // ..but do not count single byte extensions doubly
+                            counters.count2Inc(code1, start, true);
+                    }
+                    code1 = code2;
+                }
+            }
+        }
+        return gain;
+    }
+
+    SymbolTable buildSymbolTable(Counters counters, int[] line, int[] len, boolean zeroTerminated) {
+        SymbolTable symbolTable = new SymbolTable();
+        SymbolTable best = new SymbolTable();
+        int bestGain = (int) -Symbol.FSST_SAMPLEMAXSZ;
+        int sampleFrac = -128;
+        symbolTable.zeroTerminated = zeroTerminated;
+        if (zeroTerminated) {
+            symbolTable.terminator = 0;
+        } else {
+            int byteHisto[] = new int[256];
+            for (int i = 0; i < len.length; i++) {
+                int cur = line[i];
+                int end = cur + len[i];
+                while (cur < end) {
+                    byteHisto[cur++]++;
+                }
+            }
+            int minSize = (int) Symbol.FSST_SAMPLEMAXSZ, i = symbolTable.terminator = 256;
+            while (i-- > 0) {
+                if (byteHisto[i] > minSize)
+                    continue;
+                symbolTable.terminator = i;
+                minSize = byteHisto[i];
+            }
+        }
+        assert (symbolTable.terminator != 256);
+        Random rand = new Random();
+        int rand128 = rand.nextInt(129);
+        int compressCountRet = this.compressCount(this, counters, line, len, sampleFrac);
+        // TODO: Implement this method
+        // SymbolTable table = this.makeTable(SymbolTable st, Counters counters);
+        // https://github.com/cwida/fsst/blob/42850e13ba220dbba5fd721a4c54f969e2a45ac5/libfsst.cpp#L160
+        return best;
+    }
+}
