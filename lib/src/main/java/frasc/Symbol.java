@@ -48,7 +48,7 @@ public class Symbol {
     }
 
     void setCodeLength(int code, int len) {
-        icl = (len << 28) | (code << 16) | ((8 - len) * 8);
+        this.icl = (len << 28) | (code << 16) | ((8 - len) * 8);
     }
 
     int length() {
