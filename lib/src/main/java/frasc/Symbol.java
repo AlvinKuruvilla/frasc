@@ -17,6 +17,7 @@ public class Symbol {
     static final short FSST_SHIFT = 15;
     static final long FSST_SAMPLETARGET = (long) (1 << 14);
     static final long FSST_SAMPLEMAXSZ = ((long) 2 * FSST_SAMPLETARGET);
+    static final long FSST_SAMPLELINE = 512;
 
     int maxLength = 0;
     long value = 0;

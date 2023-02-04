@@ -220,7 +220,7 @@ class SymbolTable {
     // buildSymbolTable function
     // Unclear whether it is okay to leave it as a standalone function, but for
     // simplicity's sake leaving it for now.
-    int compressCount(SymbolTable symbolTable, Counters counters, int[] line, int[] len, int sampleFrac) {
+    int compressCount(SymbolTable symbolTable, Counters counters, Integer[] line, int[] len, int sampleFrac) {
         int gain = 0;
         Random rand = new Random();
         for (int i = 0; i < len.length; i++) {
@@ -302,13 +302,14 @@ class SymbolTable {
         return gain;
     }
 
-    SymbolTable buildSymbolTable(Counters counters, int[] line, int[] len, boolean zeroTerminated) {
+    SymbolTable buildSymbolTable(Counters counters, Integer[] line, int[] len, int zeroTerminated) {
         SymbolTable symbolTable = new SymbolTable();
         SymbolTable best = new SymbolTable();
         int bestGain = (int) -Symbol.FSST_SAMPLEMAXSZ;
         int sampleFrac = -128;
-        symbolTable.zeroTerminated = zeroTerminated;
-        if (zeroTerminated) {
+        // XXX: HACK
+        symbolTable.zeroTerminated = zeroTerminated == 0;
+        if (zeroTerminated == 0) {
             symbolTable.terminator = 0;
         } else {
             int byteHisto[] = new int[256];
